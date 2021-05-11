@@ -1,0 +1,27 @@
+{
+    "AttributeDefinitions": [
+        {
+            "AttributeName": "ISBN",
+            "AttributeType": "S"
+        },
+        {
+            "AttributeName": "User-ID",
+            "AttributeType": "S"
+        }
+    ],
+    "TableName": "Books-ratings",
+    "KeySchema": [
+        {
+            "AttributeName": "ISBN",
+            "KeyType": "HASH"
+        },
+        {
+            "AttributeName": "User-ID",
+            "KeyType": "RANGE"
+        }
+    ],
+    "ProvisionedThroughput": {
+        "ReadCapacityUnits": 35,
+        "WriteCapacityUnits": 35
+    }
+}

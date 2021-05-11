@@ -1,75 +1,97 @@
-# import
+import argparse
+import boto3
 import pandas as pd
-import numpy as np
 
-# load ratings
-ratings = pd.read_csv('Downloads/BX-Book-Ratings.csv', encoding='cp1251', sep=';')
-ratings = ratings[ratings['Book-Rating']!=0]
+from enum import Enum
 
-# load books
-books = pd.read_csv('Downloads/BX-Books.csv',  encoding='cp1251', sep=';',error_bad_lines=False)
+# Constants
+DATABASE_URL = 'http://localhost:8000'
+RESOURCE_NAME = 'dynamodb'
+ITEMS_DICT_KEY = 'Items'
+TABLE_NAME = 'Books-ratings'
 
-#users_ratigs = pd.merge(ratings, users, on=['User-ID'])
-dataset = pd.merge(ratings, books, on=['ISBN'])
-dataset_lowercase=dataset.apply(lambda x: x.str.lower() if(x.dtype == 'object') else x)
 
-tolkien_readers = dataset_lowercase['User-ID'][(dataset_lowercase['Book-Title']=='the fellowship of the ring (the lord of the rings, part 1)') & (dataset_lowercase['Book-Author'].str.contains("tolkien"))]
-tolkien_readers = tolkien_readers.tolist()
-tolkien_readers = np.unique(tolkien_readers)
+class ColumnNames(Enum):
+    """Constants for the column names of the table Book-Ratings from DynamoDB"""
 
-# final dataset
-books_of_tolkien_readers = dataset_lowercase[(dataset_lowercase['User-ID'].isin(tolkien_readers))]
+    ISBN = 'ISBN'
+    BOOK_TITLE = 'Book-Title'
+    BOOK_AUTHOR = 'Book-Author'
+    YEAR_OF_PUB = 'Year-Of-Publication'
+    PUBLISHER = 'Publisher'
+    USER_ID = 'User-ID'
+    BOOK_RATING = 'Book-Rating'
+    LOCATION = 'Location'
+    AGE = 'Age'
 
-# Number of ratings per other books in dataset
-number_of_rating_per_book = books_of_tolkien_readers.groupby(['Book-Title']).agg('count').reset_index()
 
-#select only books which have actually higher number of ratings than threshold
-books_to_compare = number_of_rating_per_book['Book-Title'][number_of_rating_per_book['User-ID'] >= 8]
-books_to_compare = books_to_compare.tolist()
+class DataLoader:
+    """Class used for loading data from specified url"""
 
-ratings_data_raw = books_of_tolkien_readers[['User-ID', 'Book-Rating', 'Book-Title']][books_of_tolkien_readers['Book-Title'].isin(books_to_compare)]
+    def __init__(self, endpoint_url):
+        self.__dynamodb = boto3.resource(RESOURCE_NAME, endpoint_url=endpoint_url)
 
-# group by User and Book and compute mean
-ratings_data_raw_nodup = ratings_data_raw.groupby(['User-ID', 'Book-Title'])['Book-Rating'].mean()
+    def get_all_data_from_table(self, table_name) -> pd.DataFrame:
+        """Return pandas dataframe with all the data stored in table_name"""
+        items_from_db = self.__dynamodb.Table(table_name).scan()
 
-# reset index to see User-ID in every row
-ratings_data_raw_nodup = ratings_data_raw_nodup.to_frame().reset_index()
+        return pd.DataFrame(items_from_db[ITEMS_DICT_KEY])
 
-dataset_for_corr = ratings_data_raw_nodup.pivot(index='User-ID', columns='Book-Title', values='Book-Rating')
 
-LoR_list = ['the fellowship of the ring (the lord of the rings, part 1)']
+class BookRecomender:
+    __book_data = []
 
-result_list = []
-worst_list = []
+    def __init__(self, book_data):
+        self.__book_data = self._preproces_data(book_data)
 
-# for each of the trilogy book compute:
-for LoR_book in LoR_list:
-    
-    #Take out the Lord of the Rings selected book from correlation dataframe
-    dataset_of_other_books = dataset_for_corr.copy(deep=False)
-    dataset_of_other_books.drop([LoR_book], axis=1, inplace=True)
-      
-    # empty lists
-    book_titles = []
-    correlations = []
-    avgrating = []
+    def _preproces_data(self, book_data) -> pd.DataFrame:
+        """
+            Preprocesses data
+            makes all the columns lowercased and converts numeric columns to correct type
+        """
+        
+        lowercased = book_data.apply(lambda x: x.str.lower() if(x.dtype == 'object') else x)
+        columnsToConvertToNumeric = [ColumnNames.AGE.value, ColumnNames.YEAR_OF_PUB.value, ColumnNames.BOOK_RATING.value]
+        lowercased[columnsToConvertToNumeric] = lowercased[columnsToConvertToNumeric].apply(lambda row:  pd.to_numeric(row, errors='ignore'))
 
-    # corr computation
-    for book_title in list(dataset_of_other_books.columns.values):
-        book_titles.append(book_title)
-        correlations.append(dataset_for_corr[LoR_book].corr(dataset_of_other_books[book_title]))
-        tab=(ratings_data_raw[ratings_data_raw['Book-Title']==book_title].groupby(ratings_data_raw['Book-Title']).mean())
-        avgrating.append(tab['Book-Rating'].min())
-    # final dataframe of all correlation of each book   
-    corr_fellowship = pd.DataFrame(list(zip(book_titles, correlations, avgrating)), columns=['book','corr','avg_rating'])
-    corr_fellowship.head()
+        return lowercased
 
-    # top 10 books with highest corr
-    result_list.append(corr_fellowship.sort_values('corr', ascending = False).head(10))
-    
-    #worst 10 books
-    worst_list.append(corr_fellowship.sort_values('corr', ascending = False).tail(10))
-    
-print("Correlation for book:", LoR_list[0])
-#print("Average rating of LOR:", ratings_data_raw[ratings_data_raw['Book-Title']=='the fellowship of the ring (the lord of the rings, part 1'].groupby(ratings_data_raw['Book-Title']).mean()))
-rslt = result_list[0]
+    def reccomend_books(self, book_title, count=10) -> pd.DataFrame:
+        """
+            Does a simple book recommendation, based on the title entered
+        """
+
+        # Find readers who also read the book
+        book_title_readers_ids = self.__book_data[ColumnNames.USER_ID.value][self.__book_data[ColumnNames.BOOK_TITLE.value].str.contains(book_title.lower())].unique()
+
+        # Find other books that the readers read
+        books_of_title_readers = self.__book_data[(self.__book_data[ColumnNames.USER_ID.value].isin(book_title_readers_ids))]
+
+        # Compute mean rating of this books
+        book_title_with_ratings = books_of_title_readers[[ColumnNames.BOOK_TITLE.value, ColumnNames.BOOK_RATING.value]].groupby([ColumnNames.BOOK_TITLE.value]).mean()
+
+        # Return first _count_ book sorted according to their mean rating
+        return book_title_with_ratings.sort_values(ColumnNames.BOOK_RATING.value, ascending=False).head(count)
+
+
+class Main:
+    """Runs the book reccomendation engine"""
+
+    def parse_args(self) -> argparse:
+        parser = argparse.ArgumentParser(description='')
+        parser.add_argument('book_name', metavar='Book name', type=str,
+            help='A book name to which you want reccomendations')
+
+        return parser.parse_args()
+
+    def run(self):
+        args = self.parse_args()
+        print("Finding books similar to those that have " + args.book_name + " in name ;)")
+        data_loader = DataLoader(DATABASE_URL)
+        book_recomender = BookRecomender(data_loader.get_all_data_from_table(TABLE_NAME))
+        print("The books I reccomend for you are: ")
+        print(book_recomender.reccomend_books(args.book_name))
+        print("The books are sorted according to their rating from users that also read the book you entered")
+
+if __name__ == "__main__":
+    Main().run()
